@@ -74,7 +74,7 @@ struct SensorData {
   float gpsLat, gpsLon, gpsAlt;
   float gpsSpeed;
   uint8_t gpsSats;
-} data;
+} data = {0}; // Initialize to zero
 
 // ===== SETUP FUNCTIONS =====
 void setupFilesystem() {
@@ -131,8 +131,8 @@ void setupSensors() {
   Serial.println("[LSM9DS1] OK");
 
   // Init GPS
-  GPSSerial.begin(9600, SERIAL_8N1, GNSS_RX, GNSS_TX);
-  Serial.println("[GPS] OK");
+  GPSSerial.begin(115200, SERIAL_8N1, GNSS_RX, GNSS_TX);
+  Serial.println("[GPS] OK - 115200 baud");
 
   sensorsOK = true;
   Serial.println("[SENSORS] All sensors initialized");
@@ -166,7 +166,11 @@ void readSensors() {
   // BMP280
   data.temp = bmp.readTemperature();
   data.pressure = bmp.readPressure();
-  data.altitude = bmp.readAltitude(1013.25);
+  
+  // Only calculate altitude if pressure is valid (avoid divide-by-zero)
+  if (data.pressure > 0 && data.pressure < 200000) {
+    data.altitude = bmp.readAltitude(1013.25);
+  }
 
   // LSM9DS1
   lsm.read();
@@ -185,9 +189,12 @@ void readSensors() {
   data.magY = m.magnetic.y;
   data.magZ = m.magnetic.z;
 
-  // GPS
-  while (GPSSerial.available() > 0) {
-    gps.encode(GPSSerial.read());
+  // GPS (limit processing to prevent blocking)
+  int gpsCharsProcessed = 0;
+  while (GPSSerial.available() > 0 && gpsCharsProcessed < 100) {
+    char c = GPSSerial.read();
+    gps.encode(c);
+    gpsCharsProcessed++;
   }
 
   if (gps.location.isValid()) {
@@ -201,6 +208,7 @@ void readSensors() {
 
 void logData() {
   if (!logFile) return;
+  if (!sensorsOK) return;
 
   // CSV format: time,temp,pressure,alt,ax,ay,az,gx,gy,gz,mx,my,mz,lat,lon,galt,spd,sats
   logFile.printf("%lu,%.2f,%.2f,%.2f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.2f,%.2f,%.2f,%.6f,%.6f,%.2f,%.2f,%d\n",
@@ -213,13 +221,18 @@ void logData() {
     data.gpsSpeed, data.gpsSats
   );
 
-  // Flush periodically
-  if (packetCounter % 100 == 0) {
+  // Flush periodically (only after 100 packets)
+  static uint32_t logCounter = 0;
+  logCounter++;
+  if (logCounter >= 100) {
     logFile.flush();
+    logCounter = 0;
   }
 }
 
 void transmitLoRa() {
+  if (!sensorsOK) return;
+  
   // Create compact binary packet (optimized for 5Hz @ SF9)
   // Format: [4B:time][4B:pressure][4B:alt][12B:accel/gyro][8B:gps] = 32 bytes
 
@@ -247,10 +260,10 @@ void transmitLoRa() {
   memcpy(&packet[24], &data.gpsLat, 4);
   memcpy(&packet[28], &data.gpsLon, 4);
 
-  // Transmit
+  // Transmit (non-blocking)
   LoRa.beginPacket();
   LoRa.write(packet, sizeof(packet));
-  LoRa.endPacket();
+  LoRa.endPacket(true);  // true = non-blocking/async mode
 
   packetCounter++;
 }
@@ -273,6 +286,21 @@ void setup() {
   setupSensors();
   setupLoRa();
 
+  // Let sensors stabilize and do dummy reads
+  if (sensorsOK) {
+    Serial.println("[SENSORS] Stabilizing sensors...");
+    delay(500);
+    
+    // Flush initial bad sensor data with dummy reads
+    for (int i = 0; i < 5; i++) {
+      bmp.readTemperature();
+      bmp.readPressure();
+      lsm.read();
+      delay(50);
+    }
+    Serial.println("[SENSORS] Sensors stabilized");
+  }
+
   Serial.println("\n[TX] System ready - starting data acquisition\n");
 }
 
@@ -282,11 +310,11 @@ void loop() {
   // Always read sensors
   readSensors();
 
-  // Log at 100Hz
-  if (now - lastLogTime >= LOG_INTERVAL_MS) {
-    logData();
-    lastLogTime = now;
-  }
+  // Log at 100Hz (temporarily disabled for debugging)
+  // if (now - lastLogTime >= LOG_INTERVAL_MS) {
+  //   logData();
+  //   lastLogTime = now;
+  // }
 
   // Transmit at 5Hz
   if (now - lastLoRaTime >= LORA_INTERVAL_MS) {
@@ -299,4 +327,7 @@ void loop() {
     printStatus();
     lastStatusTime = now;
   }
+
+  // Small delay to prevent watchdog issues
+  delay(1);
 }
