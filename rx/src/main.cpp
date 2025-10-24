@@ -30,10 +30,11 @@
 
 // ===== GLOBALS =====
 File logFile;
-unsigned long packetsReceived = 0;
-unsigned long lastPacketTime = 0;
+volatile unsigned long packetsReceived = 0;  // volatile for thread safety
+volatile unsigned long lastPacketTime = 0;    // volatile for thread safety
 int lastRSSI = 0;
 float lastSNR = 0;
+unsigned long logFlushCounter = 0;  // Separate counter for flush operations
 
 // Received data structure (matches TX)
 struct ReceivedData {
@@ -104,8 +105,9 @@ void setupLoRa() {
 
 // ===== RECEIVE FUNCTIONS =====
 void decodePacket(uint8_t* packet, int packetSize) {
-  if (packetSize < 32) {
-    Serial.printf("[RX] WARNING: Short packet (%d bytes) - skipping\n", packetSize);
+  // Validate packet and packet size
+  if (!packet || packetSize < 32) {
+    Serial.printf("[RX] WARNING: Invalid or short packet (%d bytes) - skipping\n", packetSize);
     return;  // Don't decode incomplete packets
   }
 
@@ -175,9 +177,11 @@ void logReceivedData() {
     lastRSSI, lastSNR
   );
 
-  // Flush every 10 packets
-  if (packetsReceived % 10 == 0) {
+  // Increment flush counter and flush every 5 packets (reduced from 10 for safety)
+  logFlushCounter++;
+  if (logFlushCounter >= 5) {
     logFile.flush();
+    logFlushCounter = 0;
   }
 }
 
@@ -203,10 +207,15 @@ void displayData() {
 
 // ===== PACKET PROCESSING =====
 void processPacket(int packetSize) {
-  if (packetSize == 0) return;
+  // Validate packet size is reasonable
+  if (packetSize <= 0 || packetSize > 256) {
+    Serial.printf("[RX] Invalid packet size: %d bytes\n", packetSize);
+    return;
+  }
 
   // Read packet
   uint8_t packet[256];
+  memset(packet, 0, sizeof(packet));  // Initialize to zero
   int idx = 0;
   while (LoRa.available() && idx < 256) {
     packet[idx++] = LoRa.read();
@@ -250,21 +259,32 @@ void loop() {
   if (packetSize) {
     processPacket(packetSize);
   }
-  
+
   // Status update every second
   static unsigned long lastStatusTime = 0;
-  if (millis() - lastStatusTime > 1000) {
-    lastStatusTime = millis();
-    
-    if (packetsReceived == 0) {
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - lastStatusTime >= 1000) {
+    lastStatusTime = currentMillis;
+
+    // Use local copies to avoid race conditions
+    unsigned long pktsRx = packetsReceived;
+    unsigned long lastPktTime = lastPacketTime;
+
+    if (pktsRx == 0) {
       Serial.println("[RX] Listening... (no packets yet)");
     } else {
-      unsigned long timeSinceLastPacket = millis() - lastPacketTime;
-      Serial.printf("[RX] Total packets: %lu | Last: %lu ms ago\n", 
-                    packetsReceived, timeSinceLastPacket);
+      // Calculate time difference safely
+      unsigned long timeDiff = currentMillis - lastPktTime;
+      // Print with safe values
+      Serial.print("[RX] Total packets: ");
+      Serial.print(pktsRx);
+      Serial.print(" | Last: ");
+      Serial.print(timeDiff);
+      Serial.println(" ms ago");
     }
   }
 
-  // No delay - maximize packet capture
-  yield();
+  // Small delay to prevent timing issues while still being responsive
+  delay(1);
 }
