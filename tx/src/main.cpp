@@ -162,6 +162,9 @@ void setupLoRa() {
   
   // Set preamble length (default is 8, increase for better detection)
   LoRa.setPreambleLength(8);
+  
+  // Verify frequency was actually set
+  Serial.printf("[LoRa] Frequency register check: %ld Hz\n", (long)LORA_FREQ);
 
   Serial.println("[LoRa] Configuration:");
   Serial.printf("  Frequency: %.2f MHz\n", LORA_FREQ / 1E6);
@@ -281,11 +284,17 @@ void transmitLoRa() {
   memcpy(&packet[24], &data.gpsLat, 4);
   memcpy(&packet[28], &data.gpsLon, 4);
 
-  // Debug: Print first few packets
-  if (packetCounter < 3) {
+  // Debug: Print first 10 packets with raw bytes
+  if (packetCounter < 10) {
     Serial.println("\n[TX DEBUG] Packet data:");
     Serial.printf("  T=%lu, P=%.2f, Alt=%.2f, Az=%.2f\n", 
                   data.timestamp, data.pressure, data.altitude, data.accelZ);
+    Serial.println("  Raw packet (hex):");
+    for (int i = 0; i < 32; i++) {
+      Serial.printf("%02X ", packet[i]);
+      if ((i + 1) % 16 == 0) Serial.println();
+    }
+    Serial.println();
   }
 
   // Transmit

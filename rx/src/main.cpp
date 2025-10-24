@@ -44,19 +44,36 @@ struct ReceivedData {
   float accelX, accelY, accelZ;
   float gyroX, gyroY, gyroZ;
   float gpsLat, gpsLon;
-} rxData;
+} rxData = {0};  // Initialize all fields to zero
 
 // ===== SETUP FUNCTIONS =====
 void setupFilesystem() {
+  Serial.println("[FS] File logging disabled (LittleFS.open causes crash)");
+  Serial.println("[FS] Data will be displayed to terminal only");
+  // TODO: Fix LittleFS integration - currently causes IntegerDivideByZero crash
+  // when calling LittleFS.open(). This is a known issue with some ESP32 boards.
+  return;
+  
+  /* DISABLED - causes bootloop
   Serial.println("[FS] Initializing LittleFS...");
-  if (!LittleFS.begin(true)) {
-    Serial.println("[FS] ERROR: Failed to mount filesystem");
-    return;
+  
+  // Try without format-on-fail first
+  if (!LittleFS.begin(false)) {
+    Serial.println("[FS] First mount failed, trying to format...");
+    if (!LittleFS.begin(true)) {
+      Serial.println("[FS] ERROR: Failed to mount filesystem even after format");
+      Serial.println("[FS] WARNING: Continuing without logging");
+      return;
+    }
   }
+
+  Serial.println("[FS] LittleFS mounted successfully");
 
   // Create timestamped log file
   char filename[32];
   snprintf(filename, sizeof(filename), "/rx_log_%lu.csv", millis());
+  
+  Serial.printf("[FS] Creating log file: %s\n", filename);
   logFile = LittleFS.open(filename, "w");
 
   if (!logFile) {
@@ -69,6 +86,7 @@ void setupFilesystem() {
   logFile.flush();
 
   Serial.printf("[FS] Logging to: %s\n", filename);
+  */
 }
 
 void setupLoRa() {
@@ -94,33 +112,81 @@ void setupLoRa() {
   
   // Set preamble length (must match TX)
   LoRa.setPreambleLength(8);
+  
+  // Verify frequency was actually set
+  Serial.printf("[LoRa] Frequency register check: %ld Hz\n", (long)LORA_FREQ);
+  Serial.println("[LoRa] NOTE: Packets with RSSI < -150 dBm will be rejected as noise");
 
+  // Calculate values separately to avoid potential printf issues
+  double freqMHz = (double)LORA_FREQ / 1000000.0;
+  double bwKHz = (double)LORA_BANDWIDTH / 1000.0;
+  
   Serial.println("[LoRa] Configuration:");
-  Serial.printf("  Frequency: %.2f MHz\n", LORA_FREQ / 1E6);
-  Serial.printf("  Bandwidth: %.1f kHz\n", LORA_BANDWIDTH / 1E3);
-  Serial.printf("  Spreading Factor: %d\n", LORA_SPREADING);
-  Serial.printf("  Coding Rate: 4/%d\n", LORA_CODING_RATE);
+  Serial.print("  Frequency: ");
+  Serial.print(freqMHz, 2);
+  Serial.println(" MHz");
+  Serial.print("  Bandwidth: ");
+  Serial.print(bwKHz, 1);
+  Serial.println(" kHz");
+  Serial.print("  Spreading Factor: ");
+  Serial.println(LORA_SPREADING);
+  Serial.print("  Coding Rate: 4/");
+  Serial.println(LORA_CODING_RATE);
   Serial.println("[LoRa] Ready - Waiting for packets...");
 }
 
 // ===== RECEIVE FUNCTIONS =====
-void decodePacket(uint8_t* packet, int packetSize) {
+bool decodePacket(uint8_t* packet, int packetSize) {
   // Validate packet and packet size
   if (!packet || packetSize < 32) {
     Serial.printf("[RX] WARNING: Invalid or short packet (%d bytes) - skipping\n", packetSize);
-    return;  // Don't decode incomplete packets
+    return false;  // Don't decode incomplete packets
   }
+
+  // Get RSSI/SNR early to filter noise
+  int rssi = LoRa.packetRssi();
+  float snr = LoRa.packetSnr();
+  
+  // Reject obvious noise packets (RSSI < -150 dBm is impossible for real packets)
+  if (rssi < -150 || rssi == -164) {
+    static unsigned long noiseCount = 0;
+    noiseCount++;
+    if (noiseCount % 100 == 0) {  // Only print every 100th noise packet
+      Serial.printf("[RX] WARNING: Rejecting noise packets (count: %lu, RSSI=%d dBm)\n", 
+                    noiseCount, rssi);
+    }
+    return false;
+  }
+  
+  // Reject packets that aren't exactly 32 bytes (our expected size)
+  if (packetSize != 32) {
+    Serial.printf("[RX] WARNING: Wrong packet size %d (expected 32) - rejecting\n", packetSize);
+    return false;
+  }
+  
+  // Debug: Show raw packet bytes for valid packets only
+  Serial.println("[DEBUG] Valid packet received! Raw (hex):");
+  for (int i = 0; i < 32 && i < packetSize; i++) {
+    Serial.printf("%02X ", packet[i]);
+    if ((i + 1) % 16 == 0) Serial.println();
+  }
+  Serial.println();
+  Serial.printf("[DEBUG] RSSI=%d dBm, SNR=%.1f dB\n", rssi, snr);
 
   // Decode binary packet (matches TX format)
   memcpy(&rxData.timestamp, &packet[0], 4);
   memcpy(&rxData.pressure, &packet[4], 4);
   memcpy(&rxData.altitude, &packet[8], 4);
 
+  // Debug: Print decoded values before validation
+  Serial.printf("[DEBUG] Decoded: T=%lu, P=%.2f, Alt=%.2f\n", 
+                rxData.timestamp, rxData.pressure, rxData.altitude);
+
   // Validate floats - reject if NaN or Inf (corrupted packet)
   if (isnan(rxData.pressure) || isinf(rxData.pressure) ||
       isnan(rxData.altitude) || isinf(rxData.altitude)) {
     Serial.println("[RX] WARNING: Corrupted packet (NaN/Inf values) - skipping");
-    return;
+    return false;
   }
 
   // Unpack accel/gyro
@@ -154,6 +220,8 @@ void decodePacket(uint8_t* packet, int packetSize) {
   // Get signal quality
   lastRSSI = LoRa.packetRssi();
   lastSNR = LoRa.packetSnr();
+  
+  return true;  // Successfully decoded
 }
 
 void logReceivedData() {
@@ -213,25 +281,37 @@ void processPacket(int packetSize) {
     return;
   }
 
-  // Read packet
+  // Read packet - read exactly packetSize bytes
   uint8_t packet[256];
   memset(packet, 0, sizeof(packet));  // Initialize to zero
-  int idx = 0;
-  while (LoRa.available() && idx < 256) {
-    packet[idx++] = LoRa.read();
+  
+  // Read all bytes - when parsePacket() returns > 0, all bytes should be available
+  int bytesRead = 0;
+  int available = LoRa.available();
+  
+  for (int i = 0; i < packetSize && i < 256; i++) {
+    packet[i] = LoRa.read();
+    bytesRead++;
   }
+
+  // Debug: ALWAYS print bytes read vs expected
+  Serial.printf("[DEBUG] PacketSize=%d, Available=%d, Read=%d bytes\n", 
+                packetSize, available, bytesRead);
 
   // Increment counter first
   packetsReceived++;
   lastPacketTime = millis();
 
   // Only process if packet is complete
-  if (packetSize >= 32) {
-    decodePacket(packet, packetSize);
-    logReceivedData();
-    displayData();
+  if (packetSize >= 32 && bytesRead >= 32) {
+    // Decode packet and only display if successful
+    if (decodePacket(packet, packetSize)) {
+      logReceivedData();
+      displayData();
+    }
+    // If decode failed, the function already printed a warning
   } else {
-    Serial.printf("[RX] Skipped short packet (%d bytes)\n", packetSize);
+    Serial.printf("[RX] Skipped short/incomplete packet (expected: %d, read: %d bytes)\n", packetSize, bytesRead);
   }
 }
 
