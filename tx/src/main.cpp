@@ -14,7 +14,7 @@
 #include <Wire.h>
 #include <SPI.h>
 #include <LoRa.h>
-#include <LittleFS.h>
+#include <SPIFFS.h>
 #include <Adafruit_BMP280.h>
 #include <Adafruit_LSM9DS1.h>
 #include <Adafruit_Sensor.h>
@@ -39,14 +39,14 @@
 
 // ===== LORA SETTINGS =====
 #define LORA_FREQ 433E6         // 433 MHz
-#define LORA_BANDWIDTH 125E3    // 125 kHz
-#define LORA_SPREADING 9        // SF9 for 2km+ range
+#define LORA_BANDWIDTH 250E3    // 250 kHz (2x faster than 125 kHz)
+#define LORA_SPREADING 8        // SF8 - balanced speed/range for 2km
 #define LORA_CODING_RATE 6      // 4/6
 #define LORA_TX_POWER 20        // 20 dBm
 
 // ===== TIMING =====
 #define LOG_INTERVAL_MS 10      // 100Hz logging
-#define LORA_INTERVAL_MS 500    // 2Hz transmission (slower for better reliability)
+#define LORA_INTERVAL_MS 100    // 10Hz transmission (5x faster, ~100ms air time)
 #define STATUS_INTERVAL_MS 1000 // 1Hz status print
 
 // ===== GLOBALS =====
@@ -61,6 +61,7 @@ unsigned long lastLoRaTime = 0;
 unsigned long lastStatusTime = 0;
 unsigned long packetCounter = 0;
 bool sensorsOK = false;
+bool dumpLogRequested = false;
 
 // Sensor data structure
 struct SensorData {
@@ -78,14 +79,22 @@ struct SensorData {
 
 // ===== SETUP FUNCTIONS =====
 void setupFilesystem() {
-  Serial.println("[FS] Initializing LittleFS...");
-  if (!LittleFS.begin(true)) {
-    Serial.println("[FS] ERROR: Failed to mount filesystem");
-    return;
+  Serial.println("[FS] Initializing SPIFFS (more stable than LittleFS)...");
+  
+  // Try to mount SPIFFS (don't format on fail initially)
+  if (!SPIFFS.begin(false)) {
+    Serial.println("[FS] Mount failed, formatting SPIFFS...");
+    if (!SPIFFS.begin(true)) {
+      Serial.println("[FS] ERROR: SPIFFS format failed");
+      Serial.println("[FS] Continuing without logging");
+      return;
+    }
   }
 
+  Serial.println("[FS] SPIFFS mounted successfully");
+
   // Open log file
-  logFile = LittleFS.open("/flight_log.csv", "a");
+  logFile = SPIFFS.open("/flight_log.csv", "a");
   if (!logFile) {
     Serial.println("[FS] ERROR: Failed to open log file");
     return;
@@ -94,8 +103,10 @@ void setupFilesystem() {
   // Write header if file is new
   if (logFile.size() == 0) {
     logFile.println("time,temp,pressure,alt,ax,ay,az,gx,gy,gz,mx,my,mz,lat,lon,galt,spd,sats");
+    logFile.flush();
   }
 
+  Serial.printf("[FS] Log file ready (current size: %d bytes)\n", logFile.size());
   Serial.println("[FS] Filesystem ready");
 }
 
@@ -304,13 +315,78 @@ void transmitLoRa() {
 
   packetCounter++;
   
-  // Small delay to ensure packet completes transmission
-  delay(50);
+  // No delay needed - endPacket() is blocking and waits for completion
 }
 
 void printStatus() {
   Serial.printf("[TX STATUS] T:%lu | P:%.2f Pa | Alt:%.1f m | Ax:%.2f | GPS:%d sats | Pkts TX:%lu\n",
     data.timestamp, data.pressure, data.altitude, data.accelZ, data.gpsSats, packetCounter);
+}
+
+void dumpLog() {
+  Serial.println("\n[LOG_DUMP_START]");
+  Serial.println("Dumping flight log from SPIFFS...");
+  
+  // Disable watchdog during dump
+  yield();
+  
+  // Close current log file if open
+  if (logFile) {
+    logFile.flush();
+    logFile.close();
+    delay(100);  // Give filesystem time to close properly
+  }
+  
+  // Reopen in read mode
+  File log = SPIFFS.open("/flight_log.csv", "r");
+  if (!log) {
+    Serial.println("[ERROR] Could not open log file");
+    Serial.println("[LOG_DUMP_END]");
+    
+    // Try to reopen for writing
+    delay(100);
+    logFile = SPIFFS.open("/flight_log.csv", "a");
+    return;
+  }
+  
+  size_t fileSize = log.size();
+  Serial.print("[INFO] Log file size: ");
+  Serial.print(fileSize);
+  Serial.println(" bytes");
+  Serial.println("[DATA_START]");
+  
+  // Stream the file contents in chunks to avoid watchdog issues
+  uint8_t buffer[128];
+  size_t bytesRead = 0;
+  
+  while (log.available()) {
+    size_t toRead = min((size_t)128, (size_t)log.available());
+    size_t read = log.read(buffer, toRead);
+    Serial.write(buffer, read);
+    bytesRead += read;
+    
+    // Feed the watchdog every chunk
+    if (bytesRead % 1024 == 0) {
+      yield();
+      delay(1);
+    }
+  }
+  
+  log.close();
+  Serial.println("\n[DATA_END]");
+  Serial.println("[LOG_DUMP_END]");
+  
+  // Reopen log file for continued writing
+  delay(100);
+  logFile = SPIFFS.open("/flight_log.csv", "a");
+  
+  if (logFile) {
+    Serial.println("[INFO] Log file ready for continued logging\n");
+  } else {
+    Serial.println("[WARNING] Could not reopen log file for writing\n");
+  }
+  
+  yield();
 }
 
 // ===== MAIN =====
@@ -347,16 +423,43 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
+  // Check for serial commands (non-blocking, using char array to avoid String heap issues)
+  static char cmdBuffer[32];
+  static int cmdIdx = 0;
+  
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (cmdIdx > 0) {
+        cmdBuffer[cmdIdx] = '\0';
+        
+        // Check commands
+        if (strcmp(cmdBuffer, "DUMP_LOG") == 0 || strcmp(cmdBuffer, "dump_log") == 0) {
+          dumpLogRequested = true;
+        } else if (strcmp(cmdBuffer, "HELP") == 0 || strcmp(cmdBuffer, "help") == 0) {
+          Serial.println("\n=== Available Commands ===");
+          Serial.println("DUMP_LOG - Download flight log via serial");
+          Serial.println("HELP     - Show this help message");
+          Serial.println("==========================\n");
+        }
+        
+        cmdIdx = 0;
+      }
+    } else if (cmdIdx < 31) {
+      cmdBuffer[cmdIdx++] = c;
+    }
+  }
+
   // Always read sensors
   readSensors();
 
-  // Log at 100Hz (temporarily disabled for debugging)
-  // if (now - lastLogTime >= LOG_INTERVAL_MS) {
-  //   logData();
-  //   lastLogTime = now;
-  // }
+  // Log at 100Hz (only if file is valid)
+  if (logFile && (now - lastLogTime >= LOG_INTERVAL_MS)) {
+    logData();
+    lastLogTime = now;
+  }
 
-  // Transmit at 5Hz
+  // Transmit at 10Hz
   if (now - lastLoRaTime >= LORA_INTERVAL_MS) {
     transmitLoRa();
     lastLoRaTime = now;
@@ -366,6 +469,12 @@ void loop() {
   if (now - lastStatusTime >= STATUS_INTERVAL_MS) {
     printStatus();
     lastStatusTime = now;
+  }
+
+  // Dump log if requested (do this last to avoid timing issues)
+  if (dumpLogRequested) {
+    dumpLog();
+    dumpLogRequested = false;
   }
 
   // Small delay to prevent watchdog issues

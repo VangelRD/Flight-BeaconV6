@@ -138,7 +138,7 @@
  /home/pilot__/.platformio/packages/framework-arduinoespressif32/libraries/SPI/src/SPI.h \
  /home/pilot__/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-spi.h \
  .pio/libdeps/esp32dev/LoRa/src/LoRa.h \
- /home/pilot__/.platformio/packages/framework-arduinoespressif32/libraries/LittleFS/src/LittleFS.h \
+ /home/pilot__/.platformio/packages/framework-arduinoespressif32/libraries/SPIFFS/src/SPIFFS.h \
  /home/pilot__/.platformio/packages/framework-arduinoespressif32/libraries/FS/src/FS.h \
  .pio/libdeps/esp32dev/Adafruit\ BMP280\ Library/Adafruit_BMP280.h \
  .pio/libdeps/esp32dev/Adafruit\ Unified\ Sensor/Adafruit_Sensor.h \

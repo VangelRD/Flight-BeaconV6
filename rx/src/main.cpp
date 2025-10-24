@@ -24,8 +24,8 @@
 
 // ===== LORA SETTINGS (MUST MATCH TX) =====
 #define LORA_FREQ 433E6         // 433 MHz
-#define LORA_BANDWIDTH 125E3    // 125 kHz
-#define LORA_SPREADING 9        // SF9
+#define LORA_BANDWIDTH 250E3    // 250 kHz (2x faster than 125 kHz)
+#define LORA_SPREADING 8        // SF8 - balanced speed/range for 2km
 #define LORA_CODING_RATE 6      // 4/6
 
 // ===== GLOBALS =====
