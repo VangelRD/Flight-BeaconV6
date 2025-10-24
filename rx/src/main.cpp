@@ -85,10 +85,7 @@ void setupLoRa() {
   LoRa.setSpreadingFactor(LORA_SPREADING);
   LoRa.setCodingRate4(LORA_CODING_RATE);
 
-  // Put receiver in continuous mode
-  LoRa.receive();
-
-  Serial.println("[LoRa] Ready - RX mode, SF9, BW125, 433MHz");
+  Serial.println("[LoRa] Ready - SF9, BW125, 433MHz");
 }
 
 // ===== RECEIVE FUNCTIONS =====
@@ -195,8 +192,11 @@ void setup() {
   setupFilesystem();
   setupLoRa();
 
-  // Register callback
+  // Register callback FIRST, then start receiving
   LoRa.onReceive(onReceive);
+
+  // Put receiver in continuous mode (must be AFTER onReceive registration)
+  LoRa.receive();
 
   Serial.println("\n[RX] Ground station ready - waiting for telemetry\n");
 }
