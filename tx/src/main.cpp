@@ -46,7 +46,7 @@
 
 // ===== TIMING =====
 #define LOG_INTERVAL_MS 10      // 100Hz logging
-#define LORA_INTERVAL_MS 200    // 5Hz transmission
+#define LORA_INTERVAL_MS 500    // 2Hz transmission (slower for better reliability)
 #define STATUS_INTERVAL_MS 1000 // 1Hz status print
 
 // ===== GLOBALS =====
@@ -153,8 +153,23 @@ void setupLoRa() {
   LoRa.setSpreadingFactor(LORA_SPREADING);
   LoRa.setCodingRate4(LORA_CODING_RATE);
   LoRa.setTxPower(LORA_TX_POWER);
+  
+  // Set sync word (must match RX) - 0x12 is default, but set explicitly
+  LoRa.setSyncWord(0x12);
+  
+  // Enable CRC for error detection
+  LoRa.enableCrc();
+  
+  // Set preamble length (default is 8, increase for better detection)
+  LoRa.setPreambleLength(8);
 
-  Serial.println("[LoRa] Ready - SF9, BW125, 433MHz");
+  Serial.println("[LoRa] Configuration:");
+  Serial.printf("  Frequency: %.2f MHz\n", LORA_FREQ / 1E6);
+  Serial.printf("  Bandwidth: %.1f kHz\n", LORA_BANDWIDTH / 1E3);
+  Serial.printf("  Spreading Factor: %d\n", LORA_SPREADING);
+  Serial.printf("  Coding Rate: 4/%d\n", LORA_CODING_RATE);
+  Serial.printf("  TX Power: %d dBm\n", LORA_TX_POWER);
+  Serial.println("[LoRa] Ready - Starting transmissions...");
 }
 
 // ===== DATA FUNCTIONS =====
@@ -233,7 +248,13 @@ void logData() {
 void transmitLoRa() {
   if (!sensorsOK) return;
   
-  // Create compact binary packet (optimized for 5Hz @ SF9)
+  // Make sure we have fresh sensor data
+  if (data.pressure == 0 || data.timestamp == 0) {
+    Serial.println("[TX] Warning: Sensor data not ready, skipping transmission");
+    return;
+  }
+  
+  // Create compact binary packet (optimized for 2Hz @ SF9)
   // Format: [4B:time][4B:pressure][4B:alt][12B:accel/gyro][8B:gps] = 32 bytes
 
   uint8_t packet[32];
@@ -260,16 +281,26 @@ void transmitLoRa() {
   memcpy(&packet[24], &data.gpsLat, 4);
   memcpy(&packet[28], &data.gpsLon, 4);
 
-  // Transmit (non-blocking)
+  // Debug: Print first few packets
+  if (packetCounter < 3) {
+    Serial.println("\n[TX DEBUG] Packet data:");
+    Serial.printf("  T=%lu, P=%.2f, Alt=%.2f, Az=%.2f\n", 
+                  data.timestamp, data.pressure, data.altitude, data.accelZ);
+  }
+
+  // Transmit
   LoRa.beginPacket();
   LoRa.write(packet, sizeof(packet));
-  LoRa.endPacket(true);  // true = non-blocking/async mode
+  LoRa.endPacket();  // Blocking mode for reliability
 
   packetCounter++;
+  
+  // Small delay to ensure packet completes transmission
+  delay(50);
 }
 
 void printStatus() {
-  Serial.printf("[STATUS] T:%lu | P:%.2f | Alt:%.1f | Ax:%.2f | GPS:%d sats | Pkts:%lu\n",
+  Serial.printf("[TX STATUS] T:%lu | P:%.2f Pa | Alt:%.1f m | Ax:%.2f | GPS:%d sats | Pkts TX:%lu\n",
     data.timestamp, data.pressure, data.altitude, data.accelZ, data.gpsSats, packetCounter);
 }
 
