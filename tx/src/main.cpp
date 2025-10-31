@@ -19,6 +19,7 @@
 #include <Adafruit_LSM9DS1.h>
 #include <Adafruit_Sensor.h>
 #include <TinyGPSPlus.h>
+#include <Preferences.h>
 
 // ===== PIN DEFINITIONS =====
 // I2C (SDA=21, SCL=22 - default for ESP32)
@@ -45,7 +46,7 @@
 #define LORA_TX_POWER 20        // 20 dBm
 
 // ===== TIMING =====
-#define LOG_INTERVAL_MS 10      // 100Hz logging
+#define LOG_INTERVAL_MS 5       // 200Hz logging
 #define LORA_INTERVAL_MS 100    // 10Hz transmission (5x faster, ~100ms air time)
 #define STATUS_INTERVAL_MS 1000 // 1Hz status print
 
@@ -62,6 +63,7 @@ unsigned long lastStatusTime = 0;
 unsigned long packetCounter = 0;
 bool sensorsOK = false;
 bool dumpLogRequested = false;
+Preferences fsPrefs;
 
 // Sensor data structure
 struct SensorData {
@@ -82,14 +84,37 @@ void setupFilesystem() {
   Serial.println("[FS] Initializing SPIFFS (more stable than LittleFS)...");
   
   // Try to mount SPIFFS (don't format on fail initially)
+  fsPrefs.begin("fs", false);
+  int mountFailCount = fsPrefs.getInt("mount_fail", 0);
+
   if (!SPIFFS.begin(false)) {
-    Serial.println("[FS] Mount failed, formatting SPIFFS...");
-    if (!SPIFFS.begin(true)) {
-      Serial.println("[FS] ERROR: SPIFFS format failed");
-      Serial.println("[FS] Continuing without logging");
+    mountFailCount++;
+    fsPrefs.putInt("mount_fail", mountFailCount);
+    Serial.printf("[FS] Mount failed (attempt %d/4)\n", mountFailCount);
+
+    if (mountFailCount >= 4) {
+      Serial.println("[FS] Formatting SPIFFS after 4 consecutive mount failures...");
+      if (!SPIFFS.begin(true)) {
+        Serial.println("[FS] ERROR: SPIFFS format failed");
+        Serial.println("[FS] Continuing without logging");
+        fsPrefs.end();
+        return;
+      }
+
+      Serial.println("[FS] SPIFFS formatted successfully");
+      fsPrefs.putInt("mount_fail", 0);
+    } else {
+      Serial.println("[FS] Skipping format to preserve data");
+      fsPrefs.end();
       return;
     }
+  } else {
+    if (mountFailCount != 0) {
+      Serial.println("[FS] SPIFFS mount succeeded, resetting failure counter");
+      fsPrefs.putInt("mount_fail", 0);
+    }
   }
+  fsPrefs.end();
 
   Serial.println("[FS] SPIFFS mounted successfully");
 
@@ -126,9 +151,9 @@ void setupSensors() {
   }
   bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,
                   Adafruit_BMP280::SAMPLING_X2,
-                  Adafruit_BMP280::SAMPLING_X16,
-                  Adafruit_BMP280::FILTER_X16,
-                  Adafruit_BMP280::STANDBY_MS_1);
+                  Adafruit_BMP280::SAMPLING_X4,
+                  Adafruit_BMP280::FILTER_X4,
+                  Adafruit_BMP280::STANDBY_MS_0_5);
   Serial.println("[BMP280] OK");
 
   // Init LSM9DS1
@@ -139,6 +164,22 @@ void setupSensors() {
   lsm.setupAccel(lsm.LSM9DS1_ACCELRANGE_16G);
   lsm.setupMag(lsm.LSM9DS1_MAGGAIN_4GAUSS);
   lsm.setupGyro(lsm.LSM9DS1_GYROSCALE_500DPS);
+
+  // Boost IMU data rates for high-dynamic flights
+  uint8_t ctrl6_xl = lsm.read8(XGTYPE, LSM9DS1_REGISTER_CTRL_REG6_XL);
+  ctrl6_xl &= ~(0b111 << 5);
+  ctrl6_xl |= (0b110 << 5); // 952 Hz ODR
+  lsm.write8(XGTYPE, LSM9DS1_REGISTER_CTRL_REG6_XL, ctrl6_xl);
+
+  uint8_t ctrl1_g = lsm.read8(XGTYPE, LSM9DS1_REGISTER_CTRL_REG1_G);
+  ctrl1_g &= ~(0b111 << 5);
+  ctrl1_g |= (0b110 << 5); // 952 Hz ODR
+  lsm.write8(XGTYPE, LSM9DS1_REGISTER_CTRL_REG1_G, ctrl1_g);
+
+  uint8_t ctrl1_m = lsm.read8(MAGTYPE, LSM9DS1_REGISTER_CTRL_REG1_M);
+  ctrl1_m &= ~0b111;
+  ctrl1_m |= 0b111; // 80 Hz ODR
+  lsm.write8(MAGTYPE, LSM9DS1_REGISTER_CTRL_REG1_M, ctrl1_m);
   Serial.println("[LSM9DS1] OK");
 
   // Init GPS
@@ -250,10 +291,10 @@ void logData() {
     data.gpsSpeed, data.gpsSats
   );
 
-  // Flush periodically (only after 100 packets)
+  // Flush periodically (only after 200 packets)
   static uint32_t logCounter = 0;
   logCounter++;
-  if (logCounter >= 100) {
+  if (logCounter >= 200) {
     logFile.flush();
     logCounter = 0;
   }
